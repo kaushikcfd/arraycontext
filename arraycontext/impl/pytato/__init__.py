@@ -43,8 +43,11 @@ THE SOFTWARE.
 
 from arraycontext.context import ArrayContext
 import numpy as np
-from typing import Any, Callable, Union, Sequence
+from typing import Any, Callable, Union, Sequence, TYPE_CHECKING
 from pytools.tag import Tag
+
+if TYPE_CHECKING:
+    import pytato
 
 
 class PytatoPyOpenCLArrayContext(ArrayContext):
@@ -62,6 +65,8 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
         to use the default allocator.
 
     .. automethod:: __init__
+
+    .. automethod:: transform_dag
     """
 
     def __init__(self, queue, allocator=None):
@@ -139,7 +144,10 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
         try:
             pt_prg = self._freeze_prg_cache[normalized_expr]
         except KeyError:
-            pt_prg = pt.generate_loopy(normalized_expr, cl_device=self.queue.device)
+            pt_dict_of_named_arrays = self.actx.transform_dag(
+                pt.make_dict_of_named_arrays({"_actx_out": normalized_expr}))
+            pt_prg = pt.generate_loopy(pt_dict_of_named_arrays,
+                                       cl_device=self.queue.device)
             pt_prg = pt_prg.with_transformed_program(self.transform_loopy_program)
             self._freeze_prg_cache[normalized_expr] = pt_prg
 
@@ -169,6 +177,20 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
         raise ValueError("PytatoPyOpenCLArrayContext does not implement "
                          "transform_loopy_program. Sub-classes are supposed "
                          "to implement it.")
+
+    def transform_dag(self, dag: "pytato.DictOfNamedArrays"
+                      ) -> "pytato.DictOfNamedArrays":
+        """
+        Returns a transformed version of *dag*. Sub-classes are supposed to
+        override this method to implement context-specific transformations on
+        *dag* (most likely to perform domain-specific optimizations). Every
+        :mod:`pytato` DAG that is compiled to a :mod:`pyopencl` kernel is
+        passed through this routine.
+
+        :arg dag: An instance of :class:`pytato.DictOfNamedArrays`
+        :returns: A transformed version of *dag*.
+        """
+        return dag
 
     def tag(self, tags: Union[Sequence[Tag], Tag], array):
         return array.tagged(tags)
