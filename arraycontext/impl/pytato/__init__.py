@@ -9,7 +9,9 @@ JIT-compile and execute the array expressions.
 
 Following :mod:`pytato`-based array context are provided:
 
+.. autoclass:: _BasePytatoArrayContext
 .. autoclass:: PytatoPyOpenCLArrayContext
+.. autoclass:: PytatoJAXArrayContext
 
 
 Compiling a python callable
@@ -44,14 +46,136 @@ THE SOFTWARE.
 from arraycontext.context import ArrayContext, _ScalarLike
 from arraycontext.container.traversal import rec_map_array_container
 import numpy as np
-from typing import Any, Callable, Union, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Union, Sequence, TYPE_CHECKING, Tuple, Type
 from pytools.tag import Tag
+import abc
 
 if TYPE_CHECKING:
     import pytato
 
 
-class PytatoPyOpenCLArrayContext(ArrayContext):
+class _BasePytatoArrayContext(ArrayContext, abc.ABC):
+    """
+    An abstract :class:`ArrayContext` that uses :mod:`pytato` data types to
+    represent.
+
+    .. automethod:: __init__
+
+    .. automethod:: transform_dag
+
+    .. automethod:: compile
+    """
+    def __init__(self):
+        import pytato as pt
+        super().__init__()
+        self.array_types = (pt.Array, )
+        self._freeze_prg_cache = {}
+        self._dag_transform_cache = {}
+
+    def _get_fake_numpy_namespace(self):
+        from arraycontext.impl.pytato.fake_numpy import PytatoFakeNumpyNamespace
+        return PytatoFakeNumpyNamespace(self)
+
+    def clone(self):
+        raise NotImplementedError(f".clone() not supported for {type(self)}.")
+
+    def empty(self, shape, dtype):
+        raise ValueError("PytatoPyOpenCLArrayContext does not support empty")
+
+    def zeros(self, shape, dtype):
+        import pytato as pt
+        return pt.zeros(shape, dtype)
+
+    def from_numpy(self, array: Union[np.ndarray, _ScalarLike]):
+        raise NotImplementedError()
+
+    def to_numpy(self, array):
+        raise NotImplementedError()
+
+    def freeze(self, array):
+        raise NotImplementedError()
+
+    def thaw(self, array):
+        raise NotImplementedError()
+
+    def transform_dag(self, dag: "pytato.DictOfNamedArrays"
+                      ) -> "pytato.DictOfNamedArrays":
+        """
+        Returns a transformed version of *dag*. Sub-classes are supposed to
+        override this method to implement context-specific transformations on
+        *dag* (most likely to perform domain-specific optimizations). Every
+        :mod:`pytato` DAG that is compiled to a GPU-kernel is
+        passed through this routine.
+
+        :arg dag: An instance of :class:`pytato.DictOfNamedArrays`
+        :returns: A transformed version of *dag*.
+        """
+        return dag
+
+    def transform_loopy_program(self, t_unit):
+        raise ValueError("_BasePytatoArrayContext does not implement "
+                         "transform_loopy_program. Sub-classes are supposed "
+                         "to implement it.")
+
+    def tag(self, tags: Union[Sequence[Tag], Tag], array):
+        return rec_map_array_container(lambda x: x.tagged(tags),
+                                       array)
+
+    def tag_axis(self, iaxis, tags: Union[Sequence[Tag], Tag], array):
+        return rec_map_array_container(lambda x: x.with_tagged_axis(iaxis, tags),
+                                       array)
+
+    @abc.abstractproperty
+    def frozen_array_types(self) -> Tuple[Type, ...]:
+        """
+        Returns valid frozen array types for the array context.
+        """
+        pass
+
+    def einsum(self, spec, *args, arg_names=None, tagged=()):
+        import pytato as pt
+        if arg_names is None:
+            arg_names = (None,) * len(args)
+
+        def preprocess_arg(name, arg):
+            if isinstance(arg, self.frozen_array_types):
+                ary = self.thaw(arg)
+            else:
+                assert isinstance(arg, pt.Array)
+                ary = arg
+
+            if name is not None:
+                from pytato.tags import PrefixNamed
+
+                # Tagging Placeholders with naming-related tags is pointless:
+                # They already have names. It's also counterproductive, as
+                # multiple placeholders with the same name that are not
+                # also the same object are not allowed, and this would produce
+                # a different Placeholder object of the same name.
+                if not isinstance(ary, pt.Placeholder):
+                    ary = ary.tagged(PrefixNamed(name))
+
+            return ary
+
+        return pt.einsum(spec, *[
+            preprocess_arg(name, arg)
+            for name, arg in zip(arg_names, args)
+            ])
+
+    @property
+    def permits_inplace_modification(self):
+        return False
+
+    @property
+    def supports_nonscalar_broadcasting(self):
+        return True
+
+    @property
+    def permits_advanced_indexing(self):
+        return True
+
+
+class PytatoPyOpenCLArrayContext(_BasePytatoArrayContext):
     """
     A :class:`ArrayContext` that uses :mod:`pytato` data types to represent
     the arrays targeting OpenCL for offloading operations.
@@ -73,32 +197,17 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
     """
 
     def __init__(self, queue, allocator=None):
-        import pytato as pt
         super().__init__()
         self.queue = queue
         self.allocator = allocator
-        self.array_types = (pt.Array, )
-        self._freeze_prg_cache = {}
-        self._dag_transform_cache = {}
 
         # unused, but necessary to keep the context alive
         self.context = self.queue.context
-
-    def _get_fake_numpy_namespace(self):
-        from arraycontext.impl.pytato.fake_numpy import PytatoFakeNumpyNamespace
-        return PytatoFakeNumpyNamespace(self)
 
     # {{{ ArrayContext interface
 
     def clone(self):
         return type(self)(self.queue, self.allocator)
-
-    def empty(self, shape, dtype):
-        raise ValueError("PytatoPyOpenCLArrayContext does not support empty")
-
-    def zeros(self, shape, dtype):
-        import pytato as pt
-        return pt.zeros(shape, dtype)
 
     def from_numpy(self, array: Union[np.ndarray, _ScalarLike]):
         import pytato as pt
@@ -112,6 +221,12 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
 
         cl_array = self.freeze(array)
         return cl_array.get(queue=self.queue)
+
+    @property
+    def frozen_array_types(self) -> Tuple[Type, ...]:
+        import pyopencl.array as cla
+        # TODO: This should be TaggableCLArray
+        return (cla.Array, )
 
     def call_loopy(self, program, **kwargs):
         from pytato.scalar_expr import SCALAR_CLASSES
@@ -228,80 +343,112 @@ class PytatoPyOpenCLArrayContext(ArrayContext):
     # }}}
 
     def compile(self, f: Callable[..., Any]) -> Callable[..., Any]:
-        from arraycontext.impl.pytato.compile import LazilyCompilingFunctionCaller
-        return LazilyCompilingFunctionCaller(self, f)
-
-    def transform_loopy_program(self, t_unit):
-        raise ValueError("PytatoPyOpenCLArrayContext does not implement "
-                         "transform_loopy_program. Sub-classes are supposed "
-                         "to implement it.")
+        from .compile import LazilyPyOpenCLCompilingFunctionCaller
+        return LazilyPyOpenCLCompilingFunctionCaller(self, f)
 
     def transform_dag(self, dag: "pytato.DictOfNamedArrays"
                       ) -> "pytato.DictOfNamedArrays":
-        """
-        Returns a transformed version of *dag*. Sub-classes are supposed to
-        override this method to implement context-specific transformations on
-        *dag* (most likely to perform domain-specific optimizations). Every
-        :mod:`pytato` DAG that is compiled to a :mod:`pyopencl` kernel is
-        passed through this routine.
-
-        :arg dag: An instance of :class:`pytato.DictOfNamedArrays`
-        :returns: A transformed version of *dag*.
-        """
         import pytato as pt
-
         dag = pt.transform.materialize_with_mpms(dag)
-
         return dag
 
+
+class PytatoJAXArrayContext(_BasePytatoArrayContext):
+    """
+    An arraycontext that uses a :mod:`pytato` to represent the thawed state of
+    the arrays and compiles the expressions using
+    :mod:`pytato.target.python.JAXPythonTarget`.
+    """
+
+    def clone(self):
+        return type(self)()
+
+    def from_numpy(self, array: Union[np.ndarray, _ScalarLike]):
+        import jax
+        import pytato as pt
+        return pt.make_data_wrapper(jax.device_put(array))
+
+    def to_numpy(self, array):
+        if np.isscalar(array):
+            return array
+
+        import jax
+        return jax.device_get(self.freeze(array))
+
+    @property
+    def frozen_array_types(self) -> Tuple[Type, ...]:
+        from jax.numpy import DeviceArray
+        return (DeviceArray, )
+
+    def call_loopy(self, program, **kwargs):
+        raise ValueError(f"{type(self)} does not support calling loopy.")
+
+    def freeze(self, array):
+        import pytato as pt
+        from jax.numpy import DeviceArray
+
+        if isinstance(array, DeviceArray):
+            return array.block_until_ready()
+        if not isinstance(array, pt.Array):
+            raise TypeError(f"{type(self)}.freeze invoked with "
+                            f"non-pytato array of type '{type(array)}'")
+
+        from arraycontext.impl.pytato.utils import _normalize_pt_expr
+        pt_dict_of_named_arrays = pt.make_dict_of_named_arrays(
+                {"_actx_out": array})
+
+        normalized_expr, bound_arguments = _normalize_pt_expr(
+                pt_dict_of_named_arrays)
+
+        try:
+            pt_prg = self._freeze_prg_cache[normalized_expr]
+        except KeyError:
+            pt_prg = pt.generate_jax(self.transform_dag(normalized_expr),
+                                     jit=True)
+            self._freeze_prg_cache[normalized_expr] = pt_prg
+
+        assert len(pt_prg.bound_arguments) == 0
+        out_dict = pt_prg(**bound_arguments)
+
+        return out_dict["_actx_out"].block_until_ready()
+
+    def thaw(self, array):
+        import pytato as pt
+        from jax.numpy import DeviceArray
+
+        if not isinstance(array, DeviceArray):
+            raise TypeError(f"{type(self)}.thaw expects jax device arrays, got "
+                            f"{type(array)}")
+
+        return pt.make_data_wrapper(array)
+
     def tag(self, tags: Union[Sequence[Tag], Tag], array):
-        return rec_map_array_container(lambda x: x.tagged(tags),
-                                       array)
+        import pytato as pt
+        from jax.numpy import DeviceArray
+
+        def _rec_tag(ary):
+            if isinstance(ary, DeviceArray):
+                return ary
+            else:
+                assert isinstance(ary, pt.Array)
+                return ary.tagged(tags)
+
+        return rec_map_array_container(_rec_tag, array)
 
     def tag_axis(self, iaxis, tags: Union[Sequence[Tag], Tag], array):
-        return rec_map_array_container(lambda x: x.with_tagged_axis(iaxis,
-                                                                     tags),
-                                        array)
-
-    def einsum(self, spec, *args, arg_names=None, tagged=()):
-        from arraycontext.impl.pyopencl.taggable_cl_array import TaggableCLArray
         import pytato as pt
-        if arg_names is None:
-            arg_names = (None,) * len(args)
+        from jax.numpy import DeviceArray
 
-        def preprocess_arg(name, arg):
-            if isinstance(arg, TaggableCLArray):
-                ary = self.thaw(arg)
+        def _rec_tag_axis(ary):
+            if isinstance(ary, DeviceArray):
+                return ary
             else:
-                assert isinstance(arg, pt.Array)
-                ary = arg
+                assert isinstance(ary, pt.Array)
+                return ary.with_tagged_axis(iaxis, tags)
 
-            if name is not None:
-                from pytato.tags import PrefixNamed
+        return rec_map_array_container(_rec_tag_axis,
+                                       array)
 
-                # Tagging Placeholders with naming-related tags is pointless:
-                # They already have names. It's also counterproductive, as
-                # multiple placeholders with the same name that are not
-                # also the same object are not allowed, and this would produce
-                # a different Placeholder object of the same name.
-                if not isinstance(ary, pt.Placeholder):
-                    ary = ary.tagged(PrefixNamed(name))
-
-            return ary
-
-        return pt.einsum(spec, *[
-            preprocess_arg(name, arg)
-            for name, arg in zip(arg_names, args)
-            ])
-
-    @property
-    def permits_inplace_modification(self):
-        return False
-
-    @property
-    def supports_nonscalar_broadcasting(self):
-        return True
-
-    @property
-    def permits_advanced_indexing(self):
-        return True
+    def compile(self, f: Callable[..., Any]) -> Callable[..., Any]:
+        from .compile import LazilyJAXCompilingFunctionCaller
+        return LazilyJAXCompilingFunctionCaller(self, f)
