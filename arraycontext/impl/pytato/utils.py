@@ -24,10 +24,11 @@ THE SOFTWARE.
 
 
 from typing import Any, Dict, Set, Tuple, Mapping
-from pytato.array import SizeParam, Placeholder, make_placeholder
+from pytato.array import SizeParam, Placeholder, make_placeholder, Axis as PtAxis
 from pytato.array import Array, DataWrapper, DictOfNamedArrays
 from pytato.transform import CopyMapper
 from pytools import UniqueNameGenerator
+from arraycontext.impl.pyopencl.taggable_cl_array import Axis as ClAxis
 
 
 class _DatawrapperToBoundPlaceholderMapper(CopyMapper):
@@ -57,6 +58,7 @@ class _DatawrapperToBoundPlaceholderMapper(CopyMapper):
                     shape=tuple(self.rec(s) if isinstance(s, Array) else s
                                 for s in expr.shape),
                     dtype=expr.dtype,
+                    axes=expr.axes,
                     tags=expr.tags)
 
     def map_size_param(self, expr: SizeParam) -> Array:
@@ -81,3 +83,11 @@ def _normalize_pt_expr(expr: DictOfNamedArrays) -> Tuple[DictOfNamedArrays,
     normalize_mapper = _DatawrapperToBoundPlaceholderMapper()
     normalized_expr = normalize_mapper(expr)
     return normalized_expr, normalize_mapper.bound_arguments
+
+
+def get_pt_axes_from_cl_axes(axes: Tuple[ClAxis, ...]) -> Tuple[PtAxis, ...]:
+    return tuple(PtAxis(axis.tags) for axis in axes)
+
+
+def get_cl_axes_from_pt_axes(axes: Tuple[PtAxis, ...]) -> Tuple[ClAxis, ...]:
+    return tuple(ClAxis(axis.tags) for axis in axes)
