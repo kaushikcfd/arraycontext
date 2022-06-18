@@ -741,6 +741,7 @@ def unflatten(
             # {{{ check strides
 
             if strict and hasattr(template_subary, "strides"):
+                # Checking strides for 0-sized arrays is ill-defined in numpy
                 if (
                     (template_subary.strides != subary.strides)
                     and (template_subary.size != 0)
