@@ -66,6 +66,7 @@ from .container.traversal import (
 from .impl.pyopencl import PyOpenCLArrayContext
 from .impl.pytato import (PytatoPyOpenCLArrayContext,
                           PytatoJAXArrayContext)
+from .impl.pycuda import PyCUDAArrayContext
 from .impl.jax import EagerJAXArrayContext
 
 from .pytest import (
@@ -104,7 +105,7 @@ __all__ = (
         "from_numpy", "to_numpy", "with_array_context",
         "outer",
 
-        "PyOpenCLArrayContext", "PytatoPyOpenCLArrayContext",
+        "PyOpenCLArrayContext", "PytatoPyOpenCLArrayContext","PyCUDAArrayContext",
         "PytatoJAXArrayContext",
         "EagerJAXArrayContext",
 

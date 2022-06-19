@@ -3,6 +3,7 @@
 
 .. autoclass:: PytestArrayContextFactory
 .. autoclass:: PytestPyOpenCLArrayContextFactory
+.. autoclass:: PytestPyCUDAArrayContextFactory
 
 .. autofunction:: pytest_generate_tests_for_array_contexts
 .. autofunction:: pytest_generate_tests_for_pyopencl_array_context
@@ -132,6 +133,88 @@ class _PytestPytatoPyOpenCLArrayContextFactory(
                     self.device.name.strip(),
                     self.device.platform.name.strip()))
 
+class PytestPyCUDAArrayContextFactory:
+     """
+     .. automethod:: __init__
+     .. automethod:: __call__
+     """
+
+     def __init__(self, allocator):
+         """
+         :arg allocator: a :class:`gpuarray.allocator`.
+         """
+         self.allocator = allocator
+
+     def __call__(self) -> ArrayContext:
+         raise NotImplementedError
+
+class _PytestPyCUDAArrayContextFactory(
+        PytestPyCUDAArrayContextFactory):
+
+    @property
+    def actx_class(self):
+        from arraycontext import PyCUDAArrayContext
+        return PyCUDAArrayContext
+
+    def __call__(self):
+        def make_default_context(ctx_maker=None):
+            if ctx_maker is None:
+
+                def ctx_maker(dev):
+                    return dev.make_context()
+
+            ndevices = cuda.Device.count()
+            if ndevices == 0:
+                raise RuntimeError(
+                    "No CUDA enabled device found. " "Please check your installation."
+                )
+
+            # Is CUDA_DEVICE set?
+            import os
+
+            devn = os.environ.get("CUDA_DEVICE")
+
+            # Is $HOME/.cuda_device set ?
+            if devn is None:
+                try:
+                    homedir = os.environ.get("HOME")
+                    assert homedir is not None
+                    devn = open(os.path.join(homedir, ".cuda_device")).read().strip()
+                except Exception:
+                    pass
+
+            # If either CUDA_DEVICE or $HOME/.cuda_device is set, try to use it
+            if devn is not None:
+                try:
+                    devn = int(devn)
+                except TypeError:
+                    raise TypeError(
+                        "CUDA device number (CUDA_DEVICE or ~/.cuda_device)"
+                        " must be an integer"
+                    )
+
+                dev = cuda.Device(devn)
+                return ctx_maker(dev)
+
+            # Otherwise, try to use any available device
+            else:
+                for devn in range(ndevices):
+                    dev = cuda.Device(devn)
+                    try:
+                        return ctx_maker(dev)
+                    except cuda.Error:
+                        pass
+
+                raise RuntimeError(
+                    "make_default_context() wasn't able to create a context "
+                    "on any of the %d detected devices" % ndevices
+                )
+
+        import pycuda.driver as cuda
+        actx_class = self.actx_class(None)
+        cuda.init()
+        ctx = make_default_context()
+        return actx_class
 
 class _PytestEagerJaxArrayContextFactory(PytestArrayContextFactory):
     def __init__(self, *args, **kwargs):
